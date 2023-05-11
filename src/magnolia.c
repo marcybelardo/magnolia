@@ -1,20 +1,29 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define PORT 8080
-#define BUFFER_SIZE 2048
+#include "magnolia.h"
+#include "reader.h"
 
 int main(void)
 {
     char buffer[BUFFER_SIZE];
-    char resp[] = "HTTP/1.0 200 OK\r\n"
-                  "Server: webserver-c\r\n"
-                  "Content-type: text/html\r\n\r\n"
-                  "<html>Hello, world!</html>\r\n\r\n";
+
+    struct response resp;
+    resp.header = "HTTP/1.0 200 OK\r\n"
+                  "Server: magnolia\r\n"
+                  "Content-type: text/html\r\n\r\n";
+    resp.content = malloc(sizeof(char) * BUFFER_SIZE);
+    
+    char *filename = "../public/index.html";
+    if (get_html(filename, &resp) != 0) {
+        perror("webserver (parser)");
+        return 1;
+    }
 
     // Create a socket
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -79,15 +88,28 @@ int main(void)
         printf("[%s:%u] %s %s %s\n", inet_ntoa(client_addr.sin_addr), 
                 ntohs(client_addr.sin_port), method, version, uri);
 
+        // Format response
+        int head_len = strlen(resp.header);
+        int cont_len = strlen(resp.content);
+
+        char *combine_resp = malloc(head_len + cont_len + 1);
+        if (combine_resp) {
+            memcpy(combine_resp, resp.header, head_len);
+            memcpy(combine_resp + head_len, resp.content, cont_len + 1);
+        }
+
         // Write to the socket
-        int valwrite = write(newsockfd, resp, strlen(resp));
+        int valwrite = write(newsockfd, combine_resp, strlen(combine_resp));
         if (valwrite < 0) {
             perror("webserver (write)");
             continue;
         }
 
+        free(combine_resp);
         close(newsockfd);
     }
+
+    free(resp.content);
 
     return 0;
 }

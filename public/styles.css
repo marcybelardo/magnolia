@@ -1,0 +1,48 @@
+body {
+      font-family: TimesNewRoman, Times New Roman, Times, serif;
+}
+
+
+img {
+      -webkit-filter: grayscale(100%); /* Safari 6.0 - 9.0 */
+      filter: grayscale(100%);
+      z-index: -1;
+      position: relative;
+}
+
+
+.p-3 {
+      padding: $spacer !important;
+}
+
+
+p {
+      font-size: 1.6rem !important;
+}
+
+
+a {
+      color: #121212;
+      font-size: 1.3rem;
+      text-decoration: none;
+}
+
+
+.mt-n1 {
+      margin-top: -2rem !important;
+}
+
+
+.right {
+      text-align: right !important;
+}
+
+
+.tiny {
+      font-size: 0.9rem !important;
+}
+
+
+a:hover {
+      text-decoration: underline;
+}
