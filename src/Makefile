@@ -4,10 +4,10 @@ CFLAGS = -I $(IDIR) -g
 
 ODIR = obj
 
-_DEPS = reader.h
+_DEPS = magnolia.h serve.h network.h
 DEPS = $(patsubst %,$(IDIR)/%,$(_DEPS))
 
-_OBJ = magnolia.o reader.o
+_OBJ = magnolia.o serve.o network.o
 OBJ = $(patsubst %,$(ODIR)/%,$(_OBJ))
 
 $(ODIR)/%.o: %.c $(DEPS)
