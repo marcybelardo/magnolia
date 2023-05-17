@@ -1,6 +1,6 @@
 #ifndef NETWORK
 #define NETWORK
 
-int open_conn(struct connection *conn);
+int open_connection(struct connection *conn);
 
 #endif

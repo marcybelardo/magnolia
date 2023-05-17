@@ -2,15 +2,79 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "magnolia.h"
+#include "../include/magnolia.h"
+#include "../include/serve.h"
 
-int get_file(char *filename, struct response *resp)
+int method_select(char *method)
 {
+    if (strcmp(method, "GET") == 0) {
+        return GET;
+    } else if (strcmp(method, "POST") == 0) {
+        return POST;
+    } else if (strcmp(method, "PUT") == 0) {
+        return PUT;
+    } else if (strcmp(method, "HEAD") == 0) {
+        return HEAD;
+    } else if (strcmp(method, "PATCH") == 0) {
+        return PATCH;
+    } else if (strcmp(method, "DELETE") == 0) {
+        return DELETE;
+    } else if (strcmp(method, "CONNECT") == 0) {
+        return CONNECT;
+    } else if (strcmp(method, "OPTIONS") == 0) {
+        return OPTIONS;
+    } else if (strcmp(method, "TRACE") == 0) {
+        return TRACE;
+    } else {
+        return -1;
+    }
+}
+
+void parse_request_line(char *request_string, struct HTTP_request *request)
+{
+    char requested[strlen(request_string)];
+    memcpy(requested, request_string, strlen(request_string));
+
+    for (int i = 0; i < strlen(requested) - 2; i++) {
+        if (requested[i] == '\n' && requested[i + 1] == '\n') {
+            request_string[i + 1] = '|';
+        }
+    }
+
+    char *request_line = strtok(request_string, "\n"); 
+    char *header_fields = strtok(NULL, "|");
+    char *body = strtok(NULL, "|");
+
+    char *method = strtok(request_line, " ");
+    request->method = method_select(method);
+    if (request->method < 0) {
+        perror("parse request line (method select)");
+        return;
+    }
+
+    char *uri = strtok(NULL, " ");
+    request->uri = uri;
+
+    char *version = strtok(NULL, "/");
+    version = strtok(NULL, "\n");
+    request->HTTP_version = atof(version);
+}
+
+int get_file(char *uri, struct response *resp)
+{
+    char source[1024];
     char buf[1024];
     size_t count = 0;
     size_t bytes;
 
-    FILE *fp = fopen(filename, "rb");
+    char *dir = "../public";
+
+    memcpy(source, dir, strlen(dir));
+    memcpy(source + strlen(dir), uri, strlen(uri));
+
+    printf("SOURCE: %s\n", source);
+
+    FILE *fp = fopen(source, "rb");
     if (fp == NULL) {
         perror("reader (file open)");
         return -1;

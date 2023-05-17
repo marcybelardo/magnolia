@@ -2,12 +2,14 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include "../include/magnolia.h"
-    
-int open_conn(struct connection *conn)
+#include "../include/network.h"
+
+int open_connection(struct connection *conn) 
 {
     // Create a socket
     conn->sockfd = socket(AF_INET, SOCK_STREAM, 0);
