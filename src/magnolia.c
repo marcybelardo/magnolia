@@ -7,10 +7,11 @@
 #include <unistd.h>
 
 #include "magnolia.h"
+#include "requests.h"
 #include "files.h"
 
 int main(void)
-{	
+{
 	char buffer[BUFFER_SIZE];
 
 	// Create socket
@@ -73,16 +74,16 @@ int main(void)
 			continue;
 		}
 
-		char method[BUFFER_SIZE], uri[BUFFER_SIZE], version[BUFFER_SIZE];
-		sscanf(buffer, "%s %s %s", method, uri, version);
+		struct Request req;
+		char out[BUFFER_SIZE];
+
+		sscanf(buffer, "%s %s %s", req.method, req.uri, req.version);
 		printf("[%s:%u] %s %s %s\n", inet_ntoa(client_addr.sin_addr), 
-			ntohs(client_addr.sin_port), method, uri, version);
+			ntohs(client_addr.sin_port), req.method, req.uri, req.version);
 
-		char *fname = "index.html";
-		char *out = malloc(sizeof(char) * BUFFER_SIZE);
-
-		read_html(fname, out);
-		printf("OUT: %s\n", out);
+		char full_uri[BUFFER_SIZE] = "../public";
+		strcat(full_uri, req.uri);
+		read_html(full_uri, out);
 
 		char full_resp[BUFFER_SIZE] = "HTTP/1.1 200 OK\r\nServer: magnolia\r\nContent-Type: text/html\r\n\r\n";
 		strcat(full_resp, out);
@@ -94,7 +95,6 @@ int main(void)
 			continue;
 		}
 
-		free(out);
 		close(newsockfd);
 	}
 
