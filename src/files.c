@@ -3,7 +3,7 @@
 
 #include "magnolia.h"
 
-void read_html(char *filename, char *str)
+int read_html(char *filename, char *str)
 {
 	if (strcmp(filename, "../public/") == 0) {
 		strcat(filename, "index.html");
@@ -17,8 +17,12 @@ void read_html(char *filename, char *str)
 			fprintf(stderr, "Error reading file.\n");
 		} else {
 			str[new_len++] = '\0';
+			fclose(fp);
 		}
+	} else {
+		fclose(fp);
+		return -1;
 	}
 
-	fclose(fp);
+	return 0;
 }

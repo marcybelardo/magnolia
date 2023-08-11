@@ -9,6 +9,6 @@ struct Request {
 	char version[BUFFER_SIZE];
 };
 
-void nothing(void);
+struct Request *new_request_headers(char *buffer);
 
 #endif
