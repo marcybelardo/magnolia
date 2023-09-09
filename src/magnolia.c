@@ -13,7 +13,6 @@
 
 int main(void)
 {
-	char buffer[BUFFER_SIZE];
 	struct HttpServer *server = init_httpserver(PORT);	
 
 	if (open_connection(server) != 0) {
@@ -21,32 +20,13 @@ int main(void)
 	}
 
 	for (;;) {
-		// Accept incoming connection
-		int newsockfd = accept(server->sockfd, (struct sockaddr *)&server->host_addr, 
-					(socklen_t *)&server->host_addrlen);
+		struct SocketReader sockread;
 
-		if (newsockfd < 0) {
-			perror("webserver (accept)");
-			continue; 
-		}
-		printf("Connection accepted!\n");
+		if (read_socket(server, &sockread) != 0) {
+			return -1;
+		}	
 
-		// Get client address
-		int sockn = getsockname(newsockfd, (struct sockaddr *)&server->client_addr, 
-				(socklen_t *)&server->client_addrlen);
-		if (sockn < 0) {
-			perror("webserver (getsockname)");
-			continue;
-		}
-
-		// Read from the socket
-		int valread = read(newsockfd, buffer, BUFFER_SIZE);
-		if (valread < 0) {
-			perror("webserver (read)");
-			continue;
-		}
-
-		struct Request *req = new_request_headers(buffer);
+		struct Request *req = new_request_headers(sockread.buffer);
 
 		printf("[%s:%u] %s %s %s\n", inet_ntoa(server->client_addr.sin_addr), 
 			ntohs(server->client_addr.sin_port), req->method, req->uri, req->version);
@@ -64,13 +44,13 @@ int main(void)
 		strcat(full_resp, out);
 		printf("resp: %s\n", full_resp);
 
-		int valwrite = write(newsockfd, full_resp, BUFFER_SIZE);
+		int valwrite = write(sockread.newsockfd, full_resp, BUFFER_SIZE);
 		if (valwrite < 0) {
 			perror("webserver (write)");
 			continue;
 		}
 
-		close(newsockfd);
+		close(sockread.newsockfd);
 	}
 
 	return 0;

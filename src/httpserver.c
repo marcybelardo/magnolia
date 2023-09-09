@@ -1,7 +1,9 @@
 #include <arpa/inet.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
+#include "magnolia.h"
 #include "httpserver.h"
 
 struct HttpServer *init_httpserver(int port)
@@ -29,7 +31,7 @@ int open_connection(struct HttpServer *server)
 		perror("webserver (socket)");
 		return 1;
 	}
-	printf("Socket created successfully!\n");
+	printf("Socket created successfully at %d!\n", PORT);
 
 	// Bind socket to address
 	if (bind(server->sockfd, (struct sockaddr *)&server->host_addr, 
@@ -48,3 +50,38 @@ int open_connection(struct HttpServer *server)
 
 	return 0;
 }
+
+int read_socket(struct HttpServer *server, struct SocketReader *sockread)
+{
+	sockread->newsockfd = accept(server->sockfd, (struct sockaddr *)&server->host_addr, 
+					(socklen_t *)&server->host_addrlen);
+
+	if (sockread->newsockfd < 0) {
+		perror("webserver (accept)");
+		return 1; 
+	}
+	printf("Connection accepted!\n");
+
+	// Get client address
+	sockread->sock_name = getsockname(sockread->newsockfd, (struct sockaddr *)&server->client_addr, 
+			(socklen_t *)&server->client_addrlen);
+	if (sockread->sock_name < 0) {
+		perror("webserver (getsockname)");
+		return 1;
+	}
+
+	// Read from the socket
+	sockread->valread = read(sockread->newsockfd, sockread->buffer, BUFFER_SIZE);
+	if (sockread->valread < 0) {
+		perror("webserver (read)");
+		return 1;
+	}
+
+	return 0;
+}
+
+void close_httpserver(struct HttpServer *server)
+{
+	free(server);
+}
+
