@@ -2,11 +2,12 @@
 #define DICT_ENTRY_H
 
 struct DictionaryEntry {
-	void *key;
-	void *val;
+	char *key;
+	char *val;
+	struct DictionaryEntry *next;
 };
 
-struct DictionaryEntry *new_dictionary_entry(void *key, void *val);
+struct DictionaryEntry *new_dictionary_entry(char *key, char *val);
 void free_dictionary_entry(struct DictionaryEntry *entry);
 
 #endif

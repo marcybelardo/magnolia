@@ -2,13 +2,15 @@
 #define REQUESTS_H
 
 #include "magnolia.h"
+#include "dict.h"
+
+#define BUF_SIZE 512
 
 struct Request {
-	char method[BUFFER_SIZE];
-	char uri[BUFFER_SIZE];
-	char version[BUFFER_SIZE];
+	struct Dictionary *request_line;
+	struct Dictionary *headers;
 };
 
-struct Request *new_request_headers(char *buffer);
+struct Request *new_request(char *buffer);
 
 #endif

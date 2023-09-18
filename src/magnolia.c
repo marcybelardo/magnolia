@@ -10,6 +10,8 @@
 #include "httpserver.h"
 #include "requests.h"
 #include "files.h"
+#include "dict.h"
+#include "dict_entry.h"
 
 int main(void)
 {
@@ -24,9 +26,9 @@ int main(void)
 
 		if (read_socket(server, &sockread) != 0) {
 			return -1;
-		}	
+		}
 
-		struct Request *req = new_request_headers(sockread.buffer);
+		struct Request *req = new_request(sockread.buffer);
 
 		printf("[%s:%u] %s %s %s\n", inet_ntoa(server->client_addr.sin_addr), 
 			ntohs(server->client_addr.sin_port), req->method, req->uri, req->version);

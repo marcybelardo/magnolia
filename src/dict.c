@@ -1,29 +1,69 @@
 #include <stdlib.h>
+#include <string.h>
 
-#include "node.h"
-#include "linked_list.h"
 #include "dict_entry.h"
 #include "dict.h"
 
 struct Dictionary *new_dictionary()
 {
 	struct Dictionary *new = malloc(sizeof(struct Dictionary));
-
-	new->ll = new_linked_list();
+	new->head = NULL;
 
 	return new;
 }
 
-void new_element(struct Dictionary *dict, void *key, void *val)
+void add_entry_to_dict(struct Dictionary *dict, char *key, char *val)
 {
-	struct DictionaryEntry *new_elem = new_dictionary_entry(key, val);
-	struct Node *new = new_node(new_elem);
-	add_node(dict->ll, new);
+	struct DictionaryEntry *new = new_dictionary_entry(key, val);
+	struct DictionaryEntry *ptr;
+
+	if (key == NULL || val == NULL) {
+		return;
+	}
+
+	if (!dict->head) {
+		dict->head = new;
+	} else {
+		ptr = dict->head;
+
+		while (ptr->next) {
+			ptr = ptr->next;
+		}
+
+		ptr->next = new;
+	}
+
+	return;
 }
 
-void free_dictionary(struct Dictionary *dict)
+char *search_dict(struct Dictionary *dict, char *key)
 {
-	free_linked_list(dict->ll);
-	free(dict);
+	struct DictionaryEntry *ptr;
+
+	if (dict->head) {
+		ptr = dict->head;
+
+		while (ptr->next) {
+			if (strcmp(ptr->key, key) == 0) {
+				return ptr->val;
+			}
+
+			ptr = ptr->next;
+		}
+	}
+
+	return NULL;
+}
+
+void free_dictionary(struct Dictionary *dict_to_free)
+{
+	if (dict_to_free->head->next == NULL) {
+		free_dictionary_entry(dict_to_free->head);
+		return;
+	}
+
+	dict_to_free->head = dict_to_free->head->next;
+
+	return free_dictionary(dict_to_free);
 }
 
