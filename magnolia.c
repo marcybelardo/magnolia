@@ -21,9 +21,21 @@
 
 #define MAX_EVENTS 16
 
+struct m_http_req {
+    char *method;
+    char *uri;
+};
+
+struct m_http_resp {
+    int code;
+    char *msg;
+    char *headers;
+    char *body;
+};
+
 void *get_in_addr(struct sockaddr *sa)
 {
-	if (sa->sa_family == af_inet) {
+	if (sa->sa_family == AF_INET) {
 		return &(((struct sockaddr_in *)sa)->sin_addr);
 	}
 
@@ -38,16 +50,16 @@ int open_conn(char *port)
 	int rv;
 
 	memset(&hints, 0, sizeof hints);
-	hints.ai_family = af_unspec;
-	hints.ai_socktype = sock_stream;
-	hints.ai_flags = ai_passive;
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_flags = AI_PASSIVE;
 
-	if ((rv = getaddrinfo(null, port, &hints, &servinfo)) != 0) {
+	if ((rv = getaddrinfo(NULL, port, &hints, &servinfo)) != 0) {
 		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
 		return 1;
 	}
 
-	for (p = servinfo; p != null; p = p->ai_next) {
+	for (p = servinfo; p != NULL; p = p->ai_next) {
 		if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
 			perror("[MAGNOLIA] socket");
 			continue;
@@ -82,7 +94,89 @@ int open_conn(char *port)
 	return sockfd;
 }
 
-void setnonblocking(int fd)
+void m_read(int connfd, char *buf)
+{
+    int bytes_read = read(connfd, buf, 1024);
+
+    buf[bytes_read] = '\0';
+}
+
+void m_resp_to_buf(char *buf, struct m_http_resp *resp)
+{
+    sprintf(
+            buf,
+            "HTTP/1.1 %d %s\r\n"
+            "%s\r\n"
+            "%s", 
+            resp->code, 
+            resp->msg,
+            resp->headers,
+            resp->body
+    );
+
+    return; 
+}
+
+struct m_http_req *new_req()
+{
+    struct m_http_req *req = malloc(sizeof(struct m_http_req));
+    req->method = malloc(sizeof(char) * 8);
+    req->uri = malloc(sizeof(char) * 512);
+
+    return req;
+}
+
+void m_req_parse(struct m_http_req *req, char* buf)
+{
+    char *p = buf;
+    
+    for (p = buf; *p != ' '; p++);
+    *p = '\0';
+    p++;
+    req->method = buf; 
+    buf = p;
+
+    printf("%s\n", req->method);
+
+    for (; *p != ' '; p++);
+    *p = '\0';
+    p++;
+    req->uri = buf;
+    buf = p;
+
+    printf("%s\n", req->uri);
+
+    return;
+}
+
+struct m_http_resp *new_resp(int code, char *msg)
+{
+    struct m_http_resp *resp = malloc(sizeof(struct m_http_resp));
+    resp->msg = malloc(sizeof(char) * 64);
+    resp->headers = malloc(sizeof(char) * 512);
+    resp->body = malloc(sizeof(char) * 2048);
+
+    resp->code = code;
+    resp->msg = msg;
+
+    return resp;
+}
+
+void m_resp_set_header(struct m_http_resp *resp, char *header)
+{
+    char *p1 = resp->headers;
+    char *p2 = header;
+
+    for (; *p1 != '\0'; p1++);
+    for (; *p2 != '\0'; p1++, p2++) {
+        *p1 = *p2;    
+    }
+
+    *p1 = '\r'; 
+    *(p1 + 1) = '\n';
+}
+
+void m_setnonblocking(int fd)
 {
 	int flags = fcntl(fd, F_GETFL, 0);
 	flags = flags | O_NONBLOCK;
@@ -103,10 +197,9 @@ int main(int argc, char *argv[])
 	struct epoll_event ev, events[MAX_EVENTS];
 	struct sockaddr_storage conn_addr;
 	socklen_t sin_size;
-	char s[INET6_ADDRSTRLEN];
 
 	listenfd = open_conn(PORT);
-	setnonblocking(listenfd);
+	m_setnonblocking(listenfd);
 	printf("[MAGNOLIA] waiting for connections on port %s...\n", PORT);
 
 	epollfd = epoll_create1(0);
@@ -136,10 +229,14 @@ int main(int argc, char *argv[])
 					sin_size = sizeof conn_addr;
 					connfd = accept(listenfd, (struct sockaddr *)&conn_addr, &sin_size);
 					if (connfd == -1) {
-						perror("[MAGNOLIA] accept");
-						continue;
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            break;
+                        } else {
+                            perror("[MAGNOLIA] accept");
+                            continue;
+                        }
 					}
-					setnonblocking(connfd);
+					m_setnonblocking(connfd);
 					ev.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
 					ev.data.fd = connfd;
 
@@ -150,7 +247,32 @@ int main(int argc, char *argv[])
 				}
 			} else {
 				// regular client processing
-				char buf[1024];
+				char *buf = malloc(sizeof(char) * 1024);
+                char outbuf[2048];
+                struct m_http_req *req = new_req();
+
+                m_read(events[n].data.fd, buf);
+                m_req_parse(req, buf);
+
+                printf("%s\n", buf);
+
+                struct m_http_resp *resp = new_resp(200, "OK");
+                m_resp_set_header(resp, "Content-Type: text/plain");
+                m_resp_set_header(resp, "Content-Length: 13"); 
+                resp->body = "Hello, world!";
+
+                m_resp_to_buf(outbuf, resp);
+
+                if (send(events[n].data.fd, outbuf, strlen(outbuf), 0) == -1) {
+                    perror("[MAGNOLIA] send");
+                    close(listenfd);
+                    free(buf);
+                    free(req);
+                    exit(1);
+                }
+
+                free(buf);
+                free(req);
 			}
 		}
 	}
