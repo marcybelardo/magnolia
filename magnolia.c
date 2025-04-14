@@ -21,6 +21,30 @@
 
 #define MAX_EVENTS 16
 
+typedef struct {
+    const char *ext;
+    const char *type;
+} mime_map;
+
+mime_map MIME_TYPES [] = {
+    {".css", "text/css"},
+    {".gif", "image/gif"},
+    {".htm", "text/html"},
+    {".html", "text/html"},
+    {".jpeg", "image/jpeg"},
+    {".jpg", "image/jpeg"},
+    {".ico", "image/x-icon"},
+    {".js", "application/javascript"},
+    {".pdf", "application/pdf"},
+    {".mp4", "video/mp4"},
+    {".png", "image/png"},
+    {".svg", "image/svg+xml"},
+    {".xml", "text/xml"},
+    {NULL, NULL},
+};
+
+char *DEFAULT_MIME_TYPE = "text/plain";
+
 struct m_http_req {
     char *method;
     char *uri;
@@ -94,13 +118,6 @@ int open_conn(char *port)
 	return sockfd;
 }
 
-void m_read(int connfd, char *buf)
-{
-    int bytes_read = read(connfd, buf, 1024);
-
-    buf[bytes_read] = '\0';
-}
-
 void m_resp_to_buf(char *buf, struct m_http_resp *resp)
 {
     sprintf(
@@ -115,6 +132,19 @@ void m_resp_to_buf(char *buf, struct m_http_resp *resp)
     );
 
     return; 
+}
+
+void send_resp(int connfd, struct m_http_resp *resp)
+{
+    char resp_buf[262144]; // max response size
+
+    m_resp_to_buf(resp_buf, resp);
+
+    if (send(connfd, resp_buf, strlen(resp_buf), 0) < 0) {
+        perror("[MAGNOLIA] send");
+    }
+
+    return;
 }
 
 struct m_http_req *new_req()
@@ -176,6 +206,50 @@ void m_resp_set_header(struct m_http_resp *resp, char *header)
     *(p1 + 1) = '\n';
 }
 
+static const char *get_mime_type(char *filename)
+{
+    char *p = filename;
+    for (; *p != '.'; p++);
+
+    p++;
+    mime_map *map = MIME_TYPES;
+    while (map->ext) {
+        if (strcmp(map->ext, p) == 0) {
+            return map->type;
+        }
+        map++;
+    }
+
+    return DEFAULT_MIME_TYPE;
+}
+
+void handle_http_req(int connfd)
+{
+    char req_buf[65536]; // 64K
+    
+    if (recv(connfd, req_buf, 65536 - 1, 0) < 0) {
+        perror("[MAGNOLIA] recv");
+        return;
+    }
+
+    struct m_http_req *req = new_req();
+
+    m_req_parse(req, req_buf);
+
+    if (strcmp(req->method, "GET") != 0) {
+        return; 
+    }
+
+    struct m_http_resp *resp = new_resp(200, "OK");
+    m_resp_set_header(resp, "Content-Type: text/plain");
+    m_resp_set_header(resp, "Content-Length: 13"); 
+    resp->body = "Hello, world!";
+
+    send_resp(connfd, resp);
+
+    return;
+}
+
 void m_setnonblocking(int fd)
 {
 	int flags = fcntl(fd, F_GETFL, 0);
@@ -197,6 +271,7 @@ int main(int argc, char *argv[])
 	struct epoll_event ev, events[MAX_EVENTS];
 	struct sockaddr_storage conn_addr;
 	socklen_t sin_size;
+    char s[INET6_ADDRSTRLEN];
 
 	listenfd = open_conn(PORT);
 	m_setnonblocking(listenfd);
@@ -236,6 +311,12 @@ int main(int argc, char *argv[])
                             continue;
                         }
 					}
+
+                    inet_ntop(conn_addr.ss_family,
+                            get_in_addr((struct sockaddr *)&conn_addr),
+                            s, sizeof s);
+                    printf("[MAGNOLIA] got connection from %s\n", s);
+
 					m_setnonblocking(connfd);
 					ev.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
 					ev.data.fd = connfd;
@@ -246,33 +327,7 @@ int main(int argc, char *argv[])
 					}
 				}
 			} else {
-				// regular client processing
-				char *buf = malloc(sizeof(char) * 1024);
-                char outbuf[2048];
-                struct m_http_req *req = new_req();
-
-                m_read(events[n].data.fd, buf);
-                m_req_parse(req, buf);
-
-                printf("%s\n", buf);
-
-                struct m_http_resp *resp = new_resp(200, "OK");
-                m_resp_set_header(resp, "Content-Type: text/plain");
-                m_resp_set_header(resp, "Content-Length: 13"); 
-                resp->body = "Hello, world!";
-
-                m_resp_to_buf(outbuf, resp);
-
-                if (send(events[n].data.fd, outbuf, strlen(outbuf), 0) == -1) {
-                    perror("[MAGNOLIA] send");
-                    close(listenfd);
-                    free(buf);
-                    free(req);
-                    exit(1);
-                }
-
-                free(buf);
-                free(req);
+                handle_http_req(events[n].data.fd);
 			}
 		}
 	}
