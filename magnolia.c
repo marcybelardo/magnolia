@@ -5,21 +5,59 @@
  *
  */
 
+#define _POSIX_C_SOURCE 200112L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <sys/wait.h>
-#include <sys/epoll.h>
+#include <sys/stat.h>
+
+static const char PKG_NAME[] = "magnolia v 0.0.1";
 
 #define MAX_EVENTS 16
+
+static int SOCKFD = -1;
+static char *PORT = "8888";
+static char *ROOT_DIR = NULL;
+static const char *INDEX_NAME = "index.html";
+
+struct m_conn {
+    int socket;
+    enum {
+        RECV_REQ,
+        SEND_HEAD,
+        SEND_RESP,
+        DONE
+    } state;
+    char *req;
+    size_t req_len;
+    char *method, *uri;
+    char *header;
+    size_t header_len;
+    char *resp;
+    size_t resp_len;
+};
+
+struct m_conn_map {
+    int fd;
+    struct m_conn *conn;
+};
+
+struct m_poll {
+    struct pollfd **pfds;
+    int fd_count;
+    int fd_size;
+};
 
 typedef struct {
     const char *ext;
@@ -45,292 +83,232 @@ mime_map MIME_TYPES [] = {
 
 char *DEFAULT_MIME_TYPE = "text/plain";
 
-struct m_http_req {
-    char *method;
-    char *uri;
-};
-
-struct m_http_resp {
-    int code;
-    char *msg;
-    char *headers;
-    char *body;
-};
+static char *m_strdup(const char *s)
+{
+    size_t len = strlen(s) + 1;
+    char *dest = malloc(len);
+    memcpy(dest, s, len);
+    return dest;
+}
 
 void *get_in_addr(struct sockaddr *sa)
 {
-	if (sa->sa_family == AF_INET) {
-		return &(((struct sockaddr_in *)sa)->sin_addr);
-	}
+    if (sa->sa_family == AF_INET) {
+        return &(((struct sockaddr_in *)sa)->sin_addr);
+    }
 
-	return &(((struct sockaddr_in6 *)sa)->sin6_addr);
+    return &(((struct sockaddr_in6 *)sa)->sin6_addr);
 }
 
-int open_conn(char *port)
+static struct m_conn *new_conn()
 {
-	int sockfd;
-	struct addrinfo hints, *servinfo, *p;
-	int yes = 1;
-	int rv;
+    struct m_conn *conn = malloc(sizeof(struct m_conn));
 
-	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
-	hints.ai_flags = AI_PASSIVE;
+    conn->socket = -1;
+    conn->req = NULL;
+    conn->req_len = 0;
+    conn->method = NULL;
+    conn->uri = NULL;
+    conn->header = NULL;
+    conn->header_len = 0;
+    conn->resp = NULL;
+    conn->resp_len = 0;
 
-	if ((rv = getaddrinfo(NULL, port, &hints, &servinfo)) != 0) {
-		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
-		return 1;
-	}
+    conn->state = DONE;
 
-	for (p = servinfo; p != NULL; p = p->ai_next) {
-		if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
-			perror("[MAGNOLIA] socket");
-			continue;
-		}
-
-		if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
-			perror("[MAGNOLIA] setsockopt");
-			exit(1);
-		}
-
-		if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
-			close(sockfd);
-			perror("[MAGNOLIA] bind");
-			continue;
-		}
-
-		break;
-	}
-
-	freeaddrinfo(servinfo);
-
-	if (p == NULL) {
-		fprintf(stderr, "[MAGNOLIA] failed to bind\n");
-		exit(1);
-	}
-
-	if (listen(sockfd, MAX_EVENTS) == -1) {
-		perror("[MAGNOLIA] listen");
-		exit(1);
-	}
-
-	return sockfd;
+    return conn;
 }
 
-void m_resp_to_buf(char *buf, struct m_http_resp *resp)
+void m_init_socket()
 {
-    sprintf(
-            buf,
-            "HTTP/1.1 %d %s\r\n"
-            "%s\r\n"
-            "%s", 
-            resp->code, 
-            resp->msg,
-            resp->headers,
-            resp->body
-    );
+    struct addrinfo hints, *servinfo, *p;
+    int yes = 1;
+    int rv;
 
-    return; 
-}
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
 
-void send_resp(int connfd, struct m_http_resp *resp)
-{
-    char resp_buf[262144]; // max response size
+    if ((rv = getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0) {
+        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
+        exit(EXIT_FAILURE);
+    }
 
-    m_resp_to_buf(resp_buf, resp);
+    for (p = servinfo; p != NULL; p = p->ai_next) {
+        if ((SOCKFD = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
+            perror("[MAGNOLIA] socket");
+            continue;
+        }
 
-    if (send(connfd, resp_buf, strlen(resp_buf), 0) < 0) {
-        perror("[MAGNOLIA] send");
+        if (setsockopt(SOCKFD, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
+            perror("[MAGNOLIA] setsockopt");
+            exit(EXIT_FAILURE);
+        }
+
+        if (bind(SOCKFD, p->ai_addr, p->ai_addrlen) == -1) {
+            close(SOCKFD);
+            perror("[MAGNOLIA] bind");
+            continue;
+        }
+
+        break;
+    }
+
+    freeaddrinfo(servinfo);
+
+    if (p == NULL) {
+        fprintf(stderr, "[MAGNOLIA] failed to bind\n");
+        exit(EXIT_FAILURE);
+    }
+
+    if (listen(SOCKFD, MAX_EVENTS) == -1) {
+        perror("[MAGNOLIA] listen");
+        exit(EXIT_FAILURE);
     }
 
     return;
-}
-
-struct m_http_req *new_req()
-{
-    struct m_http_req *req = malloc(sizeof(struct m_http_req));
-    req->method = malloc(sizeof(char) * 8);
-    req->uri = malloc(sizeof(char) * 512);
-
-    return req;
-}
-
-void m_req_parse(struct m_http_req *req, char* buf)
-{
-    char *p = buf;
-    
-    for (p = buf; *p != ' '; p++);
-    *p = '\0';
-    p++;
-    req->method = buf; 
-    buf = p;
-
-    printf("%s\n", req->method);
-
-    for (; *p != ' '; p++);
-    *p = '\0';
-    p++;
-    req->uri = buf;
-    buf = p;
-
-    printf("%s\n", req->uri);
-
-    return;
-}
-
-struct m_http_resp *new_resp(int code, char *msg)
-{
-    struct m_http_resp *resp = malloc(sizeof(struct m_http_resp));
-    resp->msg = malloc(sizeof(char) * 64);
-    resp->headers = malloc(sizeof(char) * 512);
-    resp->body = malloc(sizeof(char) * 2048);
-
-    resp->code = code;
-    resp->msg = msg;
-
-    return resp;
-}
-
-void m_resp_set_header(struct m_http_resp *resp, char *header)
-{
-    char *p1 = resp->headers;
-    char *p2 = header;
-
-    for (; *p1 != '\0'; p1++);
-    for (; *p2 != '\0'; p1++, p2++) {
-        *p1 = *p2;    
-    }
-
-    *p1 = '\r'; 
-    *(p1 + 1) = '\n';
 }
 
 static const char *get_mime_type(char *filename)
 {
-    char *p = filename;
-    for (; *p != '.'; p++);
+    char *p = strrchr(filename, '.');
 
-    p++;
-    mime_map *map = MIME_TYPES;
-    while (map->ext) {
-        if (strcmp(map->ext, p) == 0) {
-            return map->type;
+    if (p) {
+        mime_map *map = MIME_TYPES;
+        while (map->ext) {
+            if (strcmp(map->ext, p) == 0) {
+                return map->type;
+            }
+            map++;
         }
-        map++;
     }
 
     return DEFAULT_MIME_TYPE;
 }
 
-void handle_http_req(int connfd)
-{
-    char req_buf[65536]; // 64K
-    
-    if (recv(connfd, req_buf, 65536 - 1, 0) < 0) {
-        perror("[MAGNOLIA] recv");
-        return;
-    }
-
-    struct m_http_req *req = new_req();
-
-    m_req_parse(req, req_buf);
-
-    if (strcmp(req->method, "GET") != 0) {
-        return; 
-    }
-
-    struct m_http_resp *resp = new_resp(200, "OK");
-    m_resp_set_header(resp, "Content-Type: text/plain");
-    m_resp_set_header(resp, "Content-Length: 13"); 
-    resp->body = "Hello, world!";
-
-    send_resp(connfd, resp);
-
-    return;
-}
-
 void m_setnonblocking(int fd)
 {
-	int flags = fcntl(fd, F_GETFL, 0);
-	flags = flags | O_NONBLOCK;
+    int flags = fcntl(fd, F_GETFL, 0);
+    flags = flags | O_NONBLOCK;
 
-	fcntl(fd, F_SETFL, flags);
+    fcntl(fd, F_SETFL, flags);
+}
+
+struct m_poll *m_poll_create(int fd_size)
+{
+    int fd_count = 0;
+    struct pollfd *pfds = malloc(sizeof *pfds * fd_size);
+    struct m_poll *mp = malloc(sizeof(struct m_poll));
+
+    pfds[0].fd = SOCKFD;
+    pfds[0].events = POLLIN;
+    fd_count++;
+
+    mp->pfds = &pfds;
+    mp->fd_count = fd_count;
+    mp->fd_size = fd_size;
+
+    return mp;
+}
+
+void m_add_pfd(struct m_poll *mp, int newfd)
+{
+    if (mp->fd_count == mp->fd_size) {
+        mp->fd_size *= 2;
+        mp->pfds = realloc(mp->pfds, sizeof(*(mp->pfds)) * (mp->fd_size));
+    }
+
+    mp->pfds[mp->fd_count]->fd = newfd;
+    mp->pfds[mp->fd_count]->events = POLLIN;
+    mp->pfds[mp->fd_count]->revents = 0;
+    mp->fd_count++;
+}
+
+void m_http_process()
+{
+    int newfd;
+    int fd_size = 5;
+    struct sockaddr_storage client_addr;
+    socklen_t addrlen;
+    char clientIP[INET6_ADDRSTRLEN];
+    struct m_conn_map *conns = malloc(sizeof *conns * fd_size);
+    struct m_poll *mp = m_poll_create(fd_size);
+
+    for (;;) {
+        int poll_count = poll(*(mp->pfds), mp->fd_count, -1);
+        if (poll_count == -1) {
+            perror("[MAGNOLIA] poll");
+            exit(EXIT_FAILURE);
+        }
+
+        for (int i = 0; i < mp->fd_count; i++) {
+            if (mp->pfds[i]->revents & (POLLIN | POLLHUP)) {
+                if (mp->pfds[i]->fd == SOCKFD) {
+                    // handle new conn
+                    addrlen = sizeof client_addr;
+                    newfd = accept(SOCKFD, (struct sockaddr *)&client_addr, &addrlen);
+                    if (newfd == -1) {
+                        perror("[MAGNOLIA] accept");
+                    } else {
+                        m_add_pfd(mp, newfd);
+                        printf("[MAGNOLIA] new connection from %s on "
+                                "socket %d\n",
+                                inet_ntop(client_addr.ss_family,
+                                    get_in_addr((struct sockaddr *)&client_addr),
+                                    clientIP, INET6_ADDRSTRLEN),
+                                newfd);
+                    }
+                } else {
+                    // client
+                }
+            }
+        }
+    }
+}
+
+void parse_commands(const int argc, char *argv[])
+{
+    int i;
+    size_t len;
+
+    if ((argc < 2) || (argc == 2 && strcmp(argv[1], "--help") == 0)) {
+        printf("USAGE:\t%s /path/to/root [flags]\n\n", argv[0]);
+        exit(EXIT_SUCCESS);
+    }
+
+    ROOT_DIR = m_strdup(argv[1]);
+    len = strlen(ROOT_DIR);
+    if (len == 0) {
+        fprintf(stderr, "Root directory cannot be empty\n");
+        exit(EXIT_FAILURE);
+    }
+    if (len > 1) {
+        if (ROOT_DIR[len - 1] == '/')
+            ROOT_DIR[len - 1] = '\0';
+    }
+
+    for (i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--port") == 0) {
+            if (++i >= argc) {
+                fprintf(stderr, "Please supply a port number\n");
+                exit(EXIT_FAILURE);
+            }
+            PORT = argv[i];
+        }
+    }
 }
 
 int main(int argc, char *argv[])
 {
-	if (argc != 2) {
-		fprintf(stderr, "USAGE: magnolia [PORT]\n");
-		return 1;
-	}
+    printf("%s\n", PKG_NAME);
+    parse_commands(argc, argv);
+    m_init_socket();
 
-	char *PORT = argv[1];
+    for (;;)
+        m_http_process();
 
-	int listenfd, connfd, nfds, epollfd;
-	struct epoll_event ev, events[MAX_EVENTS];
-	struct sockaddr_storage conn_addr;
-	socklen_t sin_size;
-    char s[INET6_ADDRSTRLEN];
+    close(SOCKFD);
 
-	listenfd = open_conn(PORT);
-	m_setnonblocking(listenfd);
-	printf("[MAGNOLIA] waiting for connections on port %s...\n", PORT);
-
-	epollfd = epoll_create1(0);
-	if (epollfd == -1) {
-		perror("[MAGNOLIA] epoll_create1");
-		exit(1);
-	}
-
-	ev.events = EPOLLIN | EPOLLET;
-	ev.data.fd = listenfd;
-	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, listenfd, &ev) == -1) {
-		perror("[MAGNOLIA] epoll_ctl: listenfd");
-		exit(1);
-	}
-
-	for (;;) {
-		nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
-		if (nfds == -1) {
-			perror("[MAGNOLIA] epoll_wait");
-			exit(1);
-		}
-
-		for (int n = 0; n < nfds; ++n) {
-			if (events[n].data.fd == listenfd) {
-				// accepting a new connection
-				while (1) {
-					sin_size = sizeof conn_addr;
-					connfd = accept(listenfd, (struct sockaddr *)&conn_addr, &sin_size);
-					if (connfd == -1) {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                            break;
-                        } else {
-                            perror("[MAGNOLIA] accept");
-                            continue;
-                        }
-					}
-
-                    inet_ntop(conn_addr.ss_family,
-                            get_in_addr((struct sockaddr *)&conn_addr),
-                            s, sizeof s);
-                    printf("[MAGNOLIA] got connection from %s\n", s);
-
-					m_setnonblocking(connfd);
-					ev.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
-					ev.data.fd = connfd;
-
-					if (epoll_ctl(epollfd, EPOLL_CTL_ADD, connfd, &ev) == -1) {
-						perror("[MAGNOLIA] epoll_ctl: connfd");
-						continue;
-					}
-				}
-			} else {
-                handle_http_req(events[n].data.fd);
-			}
-		}
-	}
-
-	return 0;
+    return 0;
 }
