@@ -4,13 +4,11 @@
  *  a little http server
  *
  */
-
-#define _POSIX_C_SOURCE 200112L
-
+#include <assert.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <errno.h>
 #include <string.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -48,17 +46,6 @@ struct m_conn {
     size_t resp_len;
 };
 
-struct m_conn_map {
-    int fd;
-    struct m_conn *conn;
-};
-
-struct m_poll {
-    struct pollfd **pfds;
-    int fd_count;
-    int fd_size;
-};
-
 typedef struct {
     const char *ext;
     const char *type;
@@ -83,14 +70,6 @@ mime_map MIME_TYPES [] = {
 
 char *DEFAULT_MIME_TYPE = "text/plain";
 
-static char *m_strdup(const char *s)
-{
-    size_t len = strlen(s) + 1;
-    char *dest = malloc(len);
-    memcpy(dest, s, len);
-    return dest;
-}
-
 void *get_in_addr(struct sockaddr *sa)
 {
     if (sa->sa_family == AF_INET) {
@@ -98,25 +77,6 @@ void *get_in_addr(struct sockaddr *sa)
     }
 
     return &(((struct sockaddr_in6 *)sa)->sin6_addr);
-}
-
-static struct m_conn *new_conn()
-{
-    struct m_conn *conn = malloc(sizeof(struct m_conn));
-
-    conn->socket = -1;
-    conn->req = NULL;
-    conn->req_len = 0;
-    conn->method = NULL;
-    conn->uri = NULL;
-    conn->header = NULL;
-    conn->header_len = 0;
-    conn->resp = NULL;
-    conn->resp_len = 0;
-
-    conn->state = DONE;
-
-    return conn;
 }
 
 void m_init_socket()
@@ -195,63 +155,189 @@ void m_setnonblocking(int fd)
     fcntl(fd, F_SETFL, flags);
 }
 
-struct m_poll *m_poll_create(int fd_size)
+void m_add_pfd(struct pollfd *pfds[], int newfd, int *fd_count, int *fd_size)
 {
-    int fd_count = 0;
-    struct pollfd *pfds = malloc(sizeof *pfds * fd_size);
-    struct m_poll *mp = malloc(sizeof(struct m_poll));
-
-    pfds[0].fd = SOCKFD;
-    pfds[0].events = POLLIN;
-    fd_count++;
-
-    mp->pfds = &pfds;
-    mp->fd_count = fd_count;
-    mp->fd_size = fd_size;
-
-    return mp;
-}
-
-void m_add_pfd(struct m_poll *mp, int newfd)
-{
-    if (mp->fd_count == mp->fd_size) {
-        mp->fd_size *= 2;
-        mp->pfds = realloc(mp->pfds, sizeof(*(mp->pfds)) * (mp->fd_size));
+    if (*fd_count == *fd_size) {
+        *fd_size *= 2;
+        *pfds = realloc(*pfds, sizeof(**pfds) * (*fd_size));
     }
 
-    mp->pfds[mp->fd_count]->fd = newfd;
-    mp->pfds[mp->fd_count]->events = POLLIN;
-    mp->pfds[mp->fd_count]->revents = 0;
-    mp->fd_count++;
+    (*pfds)[*fd_count].fd = newfd;
+    (*pfds)[*fd_count].events = POLLIN;
+    (*pfds)[*fd_count].revents = 0;
+    (*fd_count)++;
 }
+
+void m_del_pfd(struct pollfd pfds[], int i, int *fd_count)
+{
+    pfds[i] = pfds[*fd_count - 1];
+    (*fd_count)--;
+}
+
+void m_add_conn(struct m_conn *conns[], int newfd, int i)
+{
+    (*conns)[i].socket = newfd;
+    (*conns)[i].req = NULL;
+    (*conns)[i].req_len = 0;
+    (*conns)[i].method = NULL;
+    (*conns)[i].uri = NULL;
+    (*conns)[i].header = NULL;
+    (*conns)[i].header_len = 0;
+    (*conns)[i].resp = NULL;
+    (*conns)[i].resp_len = 0;
+    (*conns)[i].state = RECV_REQ;
+}
+
+void m_free_conn(struct m_conn *conn)
+{
+    free(conn->req);
+    free(conn->method);
+    free(conn->uri);
+    free(conn->header);
+    free(conn->resp);
+}
+
+void m_del_conn(struct m_conn conns[], int i, int *fd_count)
+{
+    conns[i] = conns[*fd_count - 1];
+}
+
+void m_reply(struct m_conn *conn, int code, const char *msg)
+{
+    conn->resp_len = snprintf(conn->resp, 256,
+            "<!DOCTYPE html><head><title>%d %s</title></head><body>\n"
+            "<h1>%d %s</h1>\n"
+            "<hr>\n"
+            "</body></html>\n",
+            code, msg, code, msg); 
+
+    conn->header_len = snprintf(conn->header, 256,
+            "HTTP/1.1 %d %s\r\n"
+            "Server: magnolia\r\n"
+            "Content-Length: %d\r\n"
+            "Content-Type: text/html; charset=UTF-8\r\n"
+            "\r\n",
+            code, msg, conn->resp_len);
+}
+
+void m_get(struct m_conn *conn) {}
+
+void m_parse_req(struct m_conn *conn)
+{
+    char *p;
+
+    assert(conn->req_len == strlen(conn->req));
+
+    // method
+    for (p = conn->req; *p != ' '; p++);
+    *p++ = '\0';
+    conn->method = conn->req;
+    conn->req = p;
+
+    // uri
+    for (; *p != ' '; p++);
+    *p++ = '\0';
+    conn->uri = conn->req;
+    conn->req = p;
+
+    // get pointer to headers
+    for (; (*p != ' ') &&
+            (*(p + 1) != '\r') &&
+            (*(p + 2) != '\n');
+            p++);
+    p += 3;
+    conn->req = p;
+
+    return;
+}
+
+void m_process_req(struct m_conn *conn)
+{
+    m_parse_req(conn);
+
+    if (strcmp(conn->method, "GET") == 0) {
+        m_get(conn);
+    } else {
+        m_reply(conn, 501, "Not Implemented");
+    }
+
+    conn->state = SEND_HEAD;
+    free(conn->req);
+    conn->req = NULL;
+}
+
+void m_recv_req(struct m_conn *conn)
+{
+    char buf[1024];
+    size_t recvd;
+
+    assert(conn->state == RECV_REQ);
+    recvd = recv(conn->socket, buf, sizeof buf, 0);
+    if (recvd < 1) {
+        if (recvd == -1) {
+            if (errno == EAGAIN) {
+                printf("[INFO] m_recv_req would have blocked\n");
+                return;
+            }
+            fprintf(stderr, "[ERROR] revc %d: %s\n",
+                    conn->socket, strerror(errno));
+        }
+        conn->state = DONE;
+        return;
+    }
+
+    assert(recvd > 0);
+    conn->req = realloc(conn->req, conn->req_len + recvd + 1);
+    memcpy(conn->req + conn->req_len, buf, recvd);
+    conn->req_len += recvd;
+    conn->req[conn->req_len] = '\0';
+
+    process_req(conn);
+}
+
+void m_send_head(struct m_conn *conn)
+{
+
+}
+
+void m_send_resp(struct m_conn *conn)
+{}
 
 void m_http_process()
 {
     int newfd;
-    int fd_size = 5;
     struct sockaddr_storage client_addr;
     socklen_t addrlen;
     char clientIP[INET6_ADDRSTRLEN];
-    struct m_conn_map *conns = malloc(sizeof *conns * fd_size);
-    struct m_poll *mp = m_poll_create(fd_size);
+
+    int fd_count = 0;
+    int fd_size = 5;
+    struct pollfd *pfds = malloc(sizeof *pfds * fd_size);
+
+    pfds[0].fd = SOCKFD;
+    pfds[0].revents = POLLIN;
+    fd_count = 1;
+    
+    struct m_conn *conns = malloc(sizeof *conns * fd_size);
 
     for (;;) {
-        int poll_count = poll(*(mp->pfds), mp->fd_count, -1);
+        int poll_count = poll(pfds, fd_count, -1);
         if (poll_count == -1) {
             perror("[MAGNOLIA] poll");
             exit(EXIT_FAILURE);
         }
 
-        for (int i = 0; i < mp->fd_count; i++) {
-            if (mp->pfds[i]->revents & (POLLIN | POLLHUP)) {
-                if (mp->pfds[i]->fd == SOCKFD) {
+        for (int i = 0; i < fd_count; i++) {
+            if (pfds[i].revents & (POLLIN | POLLHUP)) {
+                if (pfds[i].fd == SOCKFD) {
                     // handle new conn
                     addrlen = sizeof client_addr;
                     newfd = accept(SOCKFD, (struct sockaddr *)&client_addr, &addrlen);
                     if (newfd == -1) {
                         perror("[MAGNOLIA] accept");
                     } else {
-                        m_add_pfd(mp, newfd);
+                        m_add_pfd(&pfds, newfd, &fd_count, &fd_size);
+                        m_add_conn(&conns, newfd, i);
                         printf("[MAGNOLIA] new connection from %s on "
                                 "socket %d\n",
                                 inet_ntop(client_addr.ss_family,
@@ -260,7 +346,25 @@ void m_http_process()
                                 newfd);
                     }
                 } else {
-                    // client
+                    switch (conns[i].state) {
+                    case RECV_REQ:
+                        m_recv_req(&conns[i]);
+                        break;
+                    case SEND_HEAD:
+                        m_send_head(&conns[i]);
+                        break;
+                    case SEND_RESP:
+                        m_send_resp(&conns[i]);
+                        break;
+                    case DONE:
+                        break;
+                    }
+
+                    if (conns[i].state == DONE) {
+                        m_del_pfd(pfds, i, &fd_count);
+                        m_del_conn(conns, i, &fd_count);
+                        m_free_conn(&conns[i]);
+                    }
                 }
             }
         }
@@ -277,7 +381,7 @@ void parse_commands(const int argc, char *argv[])
         exit(EXIT_SUCCESS);
     }
 
-    ROOT_DIR = m_strdup(argv[1]);
+    ROOT_DIR = strdup(argv[1]);
     len = strlen(ROOT_DIR);
     if (len == 0) {
         fprintf(stderr, "Root directory cannot be empty\n");
