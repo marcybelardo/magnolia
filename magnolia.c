@@ -25,9 +25,9 @@ static const char PKG_NAME[] = "magnolia v 0.0.1";
 #define MAX_EVENTS 16
 
 static int SOCKFD = -1;
-static char *PORT = "8888";
-static char *ROOT_DIR = NULL;
-static const char *INDEX_NAME = "index.html";
+static char* PORT = "8888";
+static char* ROOT_DIR = NULL;
+static const char* INDEX_NAME = "index.html";
 
 struct m_conn {
     int socket;
@@ -37,12 +37,13 @@ struct m_conn {
         SEND_RESP,
         DONE
     } state;
-    char *req;
+    char* req;
     size_t req_len;
-    char *method, *uri;
-    char *header;
+    char* method;
+    char* uri;
+    char* header;
     size_t header_len;
-    char *resp;
+    char* resp;
     size_t resp_len;
 };
 
@@ -70,7 +71,7 @@ mime_map MIME_TYPES [] = {
 
 char *DEFAULT_MIME_TYPE = "text/plain";
 
-void *get_in_addr(struct sockaddr *sa)
+void* get_in_addr(struct sockaddr* sa)
 {
     if (sa->sa_family == AF_INET) {
         return &(((struct sockaddr_in *)sa)->sin_addr);
@@ -81,7 +82,7 @@ void *get_in_addr(struct sockaddr *sa)
 
 void m_init_socket()
 {
-    struct addrinfo hints, *servinfo, *p;
+    struct addrinfo hints, *ai, *p;
     int yes = 1;
     int rv;
 
@@ -90,21 +91,18 @@ void m_init_socket()
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
 
-    if ((rv = getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0) {
+    if ((rv = getaddrinfo(NULL, PORT, &hints, &ai)) != 0) {
         fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
         exit(EXIT_FAILURE);
     }
 
-    for (p = servinfo; p != NULL; p = p->ai_next) {
-        if ((SOCKFD = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
-            perror("[MAGNOLIA] socket");
+    for (p = ai; p != NULL; p = p->ai_next) {
+        SOCKFD = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (SOCKFD < 0) {
             continue;
         }
 
-        if (setsockopt(SOCKFD, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
-            perror("[MAGNOLIA] setsockopt");
-            exit(EXIT_FAILURE);
-        }
+        setsockopt(SOCKFD, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
 
         if (bind(SOCKFD, p->ai_addr, p->ai_addrlen) == -1) {
             close(SOCKFD);
@@ -115,18 +113,19 @@ void m_init_socket()
         break;
     }
 
-    freeaddrinfo(servinfo);
-
     if (p == NULL) {
         fprintf(stderr, "[MAGNOLIA] failed to bind\n");
         exit(EXIT_FAILURE);
     }
+
+    freeaddrinfo(ai);
 
     if (listen(SOCKFD, MAX_EVENTS) == -1) {
         perror("[MAGNOLIA] listen");
         exit(EXIT_FAILURE);
     }
 
+    printf("Server is listening on port %s...\n", PORT);
     return;
 }
 
@@ -166,6 +165,8 @@ void m_add_pfd(struct pollfd *pfds[], int newfd, int *fd_count, int *fd_size)
     (*pfds)[*fd_count].events = POLLIN;
     (*pfds)[*fd_count].revents = 0;
     (*fd_count)++;
+
+    printf("Socket %d added to pfds\n", (*pfds)[*fd_count].fd);
 }
 
 void m_del_pfd(struct pollfd pfds[], int i, int *fd_count)
@@ -186,6 +187,8 @@ void m_add_conn(struct m_conn *conns[], int newfd, int i)
     (*conns)[i].resp = NULL;
     (*conns)[i].resp_len = 0;
     (*conns)[i].state = RECV_REQ;
+
+    printf("Conn with socket %d added to conns\n", (*conns)[i].socket);
 }
 
 void m_free_conn(struct m_conn *conn)
@@ -214,13 +217,16 @@ void m_reply(struct m_conn *conn, int code, const char *msg)
     conn->header_len = snprintf(conn->header, 256,
             "HTTP/1.1 %d %s\r\n"
             "Server: magnolia\r\n"
-            "Content-Length: %d\r\n"
+            "Content-Length: %lu\r\n"
             "Content-Type: text/html; charset=UTF-8\r\n"
             "\r\n",
             code, msg, conn->resp_len);
 }
 
-void m_get(struct m_conn *conn) {}
+void m_get(struct m_conn *conn)
+{
+    m_reply(conn, 404, "Not Found");
+}
 
 void m_parse_req(struct m_conn *conn)
 {
@@ -275,10 +281,6 @@ void m_recv_req(struct m_conn *conn)
     recvd = recv(conn->socket, buf, sizeof buf, 0);
     if (recvd < 1) {
         if (recvd == -1) {
-            if (errno == EAGAIN) {
-                printf("[INFO] m_recv_req would have blocked\n");
-                return;
-            }
             fprintf(stderr, "[ERROR] revc %d: %s\n",
                     conn->socket, strerror(errno));
         }
@@ -292,16 +294,46 @@ void m_recv_req(struct m_conn *conn)
     conn->req_len += recvd;
     conn->req[conn->req_len] = '\0';
 
-    process_req(conn);
+    m_process_req(conn);
 }
 
 void m_send_head(struct m_conn *conn)
 {
+    size_t sent;
 
+    assert(conn->state == SEND_HEAD);
+    assert(conn->header_len == strlen(conn->header));
+
+    sent = send(conn->socket, conn->header, conn->header_len, 0);
+    if (sent < 1) {
+        if (sent == -1) {
+            fprintf(stderr, "[ERROR] send header %d, %s\n",
+                    conn->socket, strerror(errno));
+        }
+        conn->state = DONE;
+        return;
+    }
+
+    assert(sent > 0);
 }
 
 void m_send_resp(struct m_conn *conn)
-{}
+{
+    size_t sent;
+
+    assert(conn->state == SEND_RESP);
+    sent = send(conn->socket, conn->resp, conn->resp_len, 0);
+    if (sent < 1) {
+        if (sent == -1) {
+            fprintf(stderr, "[ERROR] send resp %d: %s\n",
+                    conn->socket, strerror(errno));
+        }
+        conn->state = DONE;
+        return;
+    }
+
+    conn->state = DONE;
+}
 
 void m_http_process()
 {
@@ -314,8 +346,13 @@ void m_http_process()
     int fd_size = 5;
     struct pollfd *pfds = malloc(sizeof *pfds * fd_size);
 
+    if (SOCKFD == -1) {
+        fprintf(stderr, "[ERROR] couldn't get listening socket\n");
+        exit(EXIT_FAILURE);
+    }
+
     pfds[0].fd = SOCKFD;
-    pfds[0].revents = POLLIN;
+    pfds[0].events = POLLIN;
     fd_count = 1;
     
     struct m_conn *conns = malloc(sizeof *conns * fd_size);
@@ -331,6 +368,7 @@ void m_http_process()
             if (pfds[i].revents & (POLLIN | POLLHUP)) {
                 if (pfds[i].fd == SOCKFD) {
                     // handle new conn
+                    printf("Incoming connection...\n");
                     addrlen = sizeof client_addr;
                     newfd = accept(SOCKFD, (struct sockaddr *)&client_addr, &addrlen);
                     if (newfd == -1) {
