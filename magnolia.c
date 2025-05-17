@@ -25,27 +25,79 @@ static const char PKG_NAME[] = "magnolia v 0.0.1";
 #define MAX_EVENTS 16
 
 static int SOCKFD = -1;
-static char* PORT = "8888";
-static char* ROOT_DIR = NULL;
-static const char* INDEX_NAME = "index.html";
+static char *PORT = "8888";
+static char *ROOT_DIR = NULL;
+static const char *INDEX_NAME = "index.html";
 
-struct m_conn {
+typedef struct m_conn_node {
     int socket;
+    struct m_conn_node *next;
     enum {
         RECV_REQ,
         SEND_HEAD,
         SEND_RESP,
         DONE
     } state;
-    char* req;
+    char *req;
     size_t req_len;
-    char* method;
-    char* uri;
-    char* header;
+    char *method;
+    char *uri;
+    char *header;
     size_t header_len;
-    char* resp;
+    char *resp;
     size_t resp_len;
-};
+} m_conn_t;
+
+void m_add_conn_queue(m_conn_t **head, int newfd)
+{
+    m_conn_t *new_node = malloc(sizeof(m_conn_t));
+    if (!new_node)
+        return;
+
+    new_node->socket = newfd;
+    new_node->next = *head;
+    new_node->req = NULL;
+    new_node->req_len = 0;
+    new_node->method = NULL;
+    new_node->uri = NULL;
+    new_node->header = NULL;
+    new_node->header_len = 0;
+    new_node->resp = NULL;
+    new_node->resp_len = 0;
+    new_node->state = RECV_REQ;
+
+    printf("Conn with socket %d added to conns\n", new_node->socket);
+
+    *head = new_node;
+}
+
+void m_free_conn(m_conn_t *conn)
+{
+    free(conn->req);
+    free(conn->method);
+    free(conn->uri);
+    free(conn->header);
+    free(conn->resp);
+}
+
+void m_del_conn_queue(m_conn_t **head)
+{
+    m_conn_t *current, *prev = NULL;
+
+    current = *head;
+    while (current->next != NULL) {
+        prev = current;
+        current = current->next;
+    }
+
+    m_free_conn(current);
+    free(current);
+
+    if (prev)
+        prev->next = NULL;
+    else
+        *head = NULL;
+}
 
 typedef struct {
     const char *ext;
@@ -71,7 +123,7 @@ mime_map MIME_TYPES [] = {
 
 char *DEFAULT_MIME_TYPE = "text/plain";
 
-void* get_in_addr(struct sockaddr* sa)
+void *get_in_addr(struct sockaddr *sa)
 {
     if (sa->sa_family == AF_INET) {
         return &(((struct sockaddr_in *)sa)->sin_addr);
@@ -164,9 +216,8 @@ void m_add_pfd(struct pollfd *pfds[], int newfd, int *fd_count, int *fd_size)
     (*pfds)[*fd_count].fd = newfd;
     (*pfds)[*fd_count].events = POLLIN;
     (*pfds)[*fd_count].revents = 0;
-    (*fd_count)++;
 
-    printf("Socket %d added to pfds\n", (*pfds)[*fd_count].fd);
+    (*fd_count)++;
 }
 
 void m_del_pfd(struct pollfd pfds[], int i, int *fd_count)
@@ -175,37 +226,7 @@ void m_del_pfd(struct pollfd pfds[], int i, int *fd_count)
     (*fd_count)--;
 }
 
-void m_add_conn(struct m_conn *conns[], int newfd, int i)
-{
-    (*conns)[i].socket = newfd;
-    (*conns)[i].req = NULL;
-    (*conns)[i].req_len = 0;
-    (*conns)[i].method = NULL;
-    (*conns)[i].uri = NULL;
-    (*conns)[i].header = NULL;
-    (*conns)[i].header_len = 0;
-    (*conns)[i].resp = NULL;
-    (*conns)[i].resp_len = 0;
-    (*conns)[i].state = RECV_REQ;
-
-    printf("Conn with socket %d added to conns\n", (*conns)[i].socket);
-}
-
-void m_free_conn(struct m_conn *conn)
-{
-    free(conn->req);
-    free(conn->method);
-    free(conn->uri);
-    free(conn->header);
-    free(conn->resp);
-}
-
-void m_del_conn(struct m_conn conns[], int i, int *fd_count)
-{
-    conns[i] = conns[*fd_count - 1];
-}
-
-void m_reply(struct m_conn *conn, int code, const char *msg)
+void m_reply(m_conn_t *conn, int code, const char *msg)
 {
     conn->resp_len = snprintf(conn->resp, 256,
             "<!DOCTYPE html><head><title>%d %s</title></head><body>\n"
@@ -223,12 +244,12 @@ void m_reply(struct m_conn *conn, int code, const char *msg)
             code, msg, conn->resp_len);
 }
 
-void m_get(struct m_conn *conn)
+void m_get(m_conn_t *conn)
 {
     m_reply(conn, 404, "Not Found");
 }
 
-void m_parse_req(struct m_conn *conn)
+void m_parse_req(m_conn_t *conn)
 {
     char *p;
 
@@ -257,9 +278,12 @@ void m_parse_req(struct m_conn *conn)
     return;
 }
 
-void m_process_req(struct m_conn *conn)
+void m_process_req(m_conn_t *conn)
 {
     m_parse_req(conn);
+
+    printf("[conn %d] Method: %s URI: %s\n",
+            conn->socket, conn->method, conn->uri);
 
     if (strcmp(conn->method, "GET") == 0) {
         m_get(conn);
@@ -272,7 +296,7 @@ void m_process_req(struct m_conn *conn)
     conn->req = NULL;
 }
 
-void m_recv_req(struct m_conn *conn)
+void m_recv_req(m_conn_t *conn)
 {
     char buf[1024];
     size_t recvd;
@@ -294,10 +318,13 @@ void m_recv_req(struct m_conn *conn)
     conn->req_len += recvd;
     conn->req[conn->req_len] = '\0';
 
+    printf("[conn %d] Received request:\n", conn->socket);
+    printf("%s\n", conn->req);
+
     m_process_req(conn);
 }
 
-void m_send_head(struct m_conn *conn)
+void m_send_head(m_conn_t *conn)
 {
     size_t sent;
 
@@ -317,7 +344,7 @@ void m_send_head(struct m_conn *conn)
     assert(sent > 0);
 }
 
-void m_send_resp(struct m_conn *conn)
+void m_send_resp(m_conn_t *conn)
 {
     size_t sent;
 
@@ -354,8 +381,8 @@ void m_http_process()
     pfds[0].fd = SOCKFD;
     pfds[0].events = POLLIN;
     fd_count = 1;
-    
-    struct m_conn *conns = malloc(sizeof *conns * fd_size);
+
+    m_conn_t *head = NULL;
 
     for (;;) {
         int poll_count = poll(pfds, fd_count, -1);
@@ -375,7 +402,7 @@ void m_http_process()
                         perror("[MAGNOLIA] accept");
                     } else {
                         m_add_pfd(&pfds, newfd, &fd_count, &fd_size);
-                        m_add_conn(&conns, newfd, i);
+                        m_add_conn_queue(&head, newfd);
                         printf("[MAGNOLIA] new connection from %s on "
                                 "socket %d\n",
                                 inet_ntop(client_addr.ss_family,
@@ -384,24 +411,36 @@ void m_http_process()
                                 newfd);
                     }
                 } else {
-                    switch (conns[i].state) {
+                    m_conn_t *current = head;
+
+                    while (current->socket != pfds[i].fd || current != NULL) {
+                        current = current->next;
+                    }
+
+                    if (!current)
+                        continue;
+
+                    printf("Processing connection on socket %d with %s state",
+                            current->socket,
+                            current->state == RECV_REQ ? "CORRECT" : "WRONG");
+
+                    switch (current->state) {
                     case RECV_REQ:
-                        m_recv_req(&conns[i]);
+                        m_recv_req(current);
                         break;
                     case SEND_HEAD:
-                        m_send_head(&conns[i]);
+                        m_send_head(current);
                         break;
                     case SEND_RESP:
-                        m_send_resp(&conns[i]);
+                        m_send_resp(current);
                         break;
                     case DONE:
                         break;
                     }
 
-                    if (conns[i].state == DONE) {
+                    if (current->state == DONE) {
                         m_del_pfd(pfds, i, &fd_count);
-                        m_del_conn(conns, i, &fd_count);
-                        m_free_conn(&conns[i]);
+                        m_del_conn_queue(&head);
                     }
                 }
             }
