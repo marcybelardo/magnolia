@@ -23,15 +23,15 @@
 static const char PKG_NAME[] = "magnolia v 0.0.1";
 
 #define MAX_EVENTS 16
+#define MAX_CONNS 64
 
 static int SOCKFD = -1;
 static char *PORT = "8888";
 static char *ROOT_DIR = NULL;
 static const char *INDEX_NAME = "index.html";
 
-typedef struct m_conn_node {
+struct m_conn {
     int socket;
-    struct m_conn_node *next;
     enum {
         RECV_REQ,
         SEND_HEAD,
@@ -46,58 +46,29 @@ typedef struct m_conn_node {
     size_t header_len;
     char *resp;
     size_t resp_len;
-} m_conn_t;
+};
 
-void m_add_conn_queue(m_conn_t **head, int newfd)
+struct m_conn *m_init_conn(int fd)
 {
-    m_conn_t *new_node = malloc(sizeof(m_conn_t));
-    if (!new_node)
-        return;
+    struct m_conn *new_conn = malloc(sizeof(struct m_conn));
+    new_conn->socket = fd;
+    new_conn->req = malloc(sizeof(char) * 1024);
+    new_conn->req_len = 0;
+    new_conn->method = malloc(sizeof(char) * 8);
+    new_conn->uri = malloc(sizeof(char) * 128);
+    new_conn->header = malloc(sizeof(char) * 512);
+    new_conn->header_len = 0;
+    new_conn->resp = malloc(sizeof(char) * 1024);
+    new_conn->resp_len = 0;
+    new_conn->state = RECV_REQ;
 
-    new_node->socket = newfd;
-    new_node->next = *head;
-    new_node->req = NULL;
-    new_node->req_len = 0;
-    new_node->method = NULL;
-    new_node->uri = NULL;
-    new_node->header = NULL;
-    new_node->header_len = 0;
-    new_node->resp = NULL;
-    new_node->resp_len = 0;
-    new_node->state = RECV_REQ;
-
-    printf("Conn with socket %d added to conns\n", new_node->socket);
-
-    *head = new_node;
+    return new_conn;
 }
 
-void m_free_conn(m_conn_t *conn)
-{
-    free(conn->req);
-    free(conn->method);
-    free(conn->uri);
-    free(conn->header);
-    free(conn->resp);
-}
-
-void m_del_conn_queue(m_conn_t **head)
-{
-    m_conn_t *current, *prev = NULL;
-
-    current = *head;
-    while (current->next != NULL) {
-        prev = current;
-        current = current->next;
-    }
-
-    m_free_conn(current);
-    free(current);
-
-    if (prev)
-        prev->next = NULL;
-    else
-        *head = NULL;
-}
+struct conn_entry {
+    struct pollfd pfd;
+    struct m_conn *conn;
+};
 
 typedef struct {
     const char *ext;
@@ -206,27 +177,7 @@ void m_setnonblocking(int fd)
     fcntl(fd, F_SETFL, flags);
 }
 
-void m_add_pfd(struct pollfd *pfds[], int newfd, int *fd_count, int *fd_size)
-{
-    if (*fd_count == *fd_size) {
-        *fd_size *= 2;
-        *pfds = realloc(*pfds, sizeof(**pfds) * (*fd_size));
-    }
-
-    (*pfds)[*fd_count].fd = newfd;
-    (*pfds)[*fd_count].events = POLLIN;
-    (*pfds)[*fd_count].revents = 0;
-
-    (*fd_count)++;
-}
-
-void m_del_pfd(struct pollfd pfds[], int i, int *fd_count)
-{
-    pfds[i] = pfds[*fd_count - 1];
-    (*fd_count)--;
-}
-
-void m_reply(m_conn_t *conn, int code, const char *msg)
+void m_reply(struct m_conn *conn, int code, const char *msg)
 {
     conn->resp_len = snprintf(conn->resp, 256,
             "<!DOCTYPE html><head><title>%d %s</title></head><body>\n"
@@ -244,12 +195,12 @@ void m_reply(m_conn_t *conn, int code, const char *msg)
             code, msg, conn->resp_len);
 }
 
-void m_get(m_conn_t *conn)
+void m_get(struct m_conn *conn)
 {
     m_reply(conn, 404, "Not Found");
 }
 
-void m_parse_req(m_conn_t *conn)
+void m_parse_req(struct m_conn *conn)
 {
     char *p;
 
@@ -278,7 +229,7 @@ void m_parse_req(m_conn_t *conn)
     return;
 }
 
-void m_process_req(m_conn_t *conn)
+void m_process_req(struct m_conn *conn)
 {
     m_parse_req(conn);
 
@@ -296,8 +247,10 @@ void m_process_req(m_conn_t *conn)
     conn->req = NULL;
 }
 
-void m_recv_req(m_conn_t *conn)
+void m_recv_req(struct m_conn *conn)
 {
+    printf("[MAGNOLIA] m_recv_req starting\n");
+
     char buf[1024];
     size_t recvd;
 
@@ -324,7 +277,7 @@ void m_recv_req(m_conn_t *conn)
     m_process_req(conn);
 }
 
-void m_send_head(m_conn_t *conn)
+void m_send_head(struct m_conn *conn)
 {
     size_t sent;
 
@@ -344,7 +297,7 @@ void m_send_head(m_conn_t *conn)
     assert(sent > 0);
 }
 
-void m_send_resp(m_conn_t *conn)
+void m_send_resp(struct m_conn *conn)
 {
     size_t sent;
 
@@ -369,31 +322,28 @@ void m_http_process()
     socklen_t addrlen;
     char clientIP[INET6_ADDRSTRLEN];
 
-    int fd_count = 0;
-    int fd_size = 5;
-    struct pollfd *pfds = malloc(sizeof *pfds * fd_size);
-
     if (SOCKFD == -1) {
         fprintf(stderr, "[ERROR] couldn't get listening socket\n");
         exit(EXIT_FAILURE);
     }
 
-    pfds[0].fd = SOCKFD;
-    pfds[0].events = POLLIN;
-    fd_count = 1;
+    struct conn_entry conns[MAX_CONNS];
+    int conn_count = 0;
 
-    m_conn_t *head = NULL;
+    conns[0].pfd.fd = SOCKFD;
+    conns[0].pfd.events = POLLIN;
+    conn_count++;
 
     for (;;) {
-        int poll_count = poll(pfds, fd_count, -1);
+        int poll_count = poll((struct pollfd *)conns, conn_count, -1);
         if (poll_count == -1) {
             perror("[MAGNOLIA] poll");
             exit(EXIT_FAILURE);
         }
 
-        for (int i = 0; i < fd_count; i++) {
-            if (pfds[i].revents & (POLLIN | POLLHUP)) {
-                if (pfds[i].fd == SOCKFD) {
+        for (int i = 0; i < conn_count; i++) {
+            if (conns[i].pfd.revents & (POLLIN | POLLHUP)) {
+                if (conns[i].pfd.fd == SOCKFD) {
                     // handle new conn
                     printf("Incoming connection...\n");
                     addrlen = sizeof client_addr;
@@ -401,8 +351,12 @@ void m_http_process()
                     if (newfd == -1) {
                         perror("[MAGNOLIA] accept");
                     } else {
-                        m_add_pfd(&pfds, newfd, &fd_count, &fd_size);
-                        m_add_conn_queue(&head, newfd);
+                        m_setnonblocking(newfd);
+                        struct conn_entry *new_entry = &conns[conn_count];
+                        new_entry->pfd.fd = newfd;
+                        new_entry->pfd.events = POLLIN;
+                        new_entry->conn = m_init_conn(newfd);
+                        conn_count++;
                         printf("[MAGNOLIA] new connection from %s on "
                                 "socket %d\n",
                                 inet_ntop(client_addr.ss_family,
@@ -411,36 +365,29 @@ void m_http_process()
                                 newfd);
                     }
                 } else {
-                    m_conn_t *current = head;
+                    struct conn_entry *current_entry = &conns[i];
+                    printf("[MAGNOLIA] m_http_process reading from conn %d\n",
+                            current_entry->pfd.fd);
 
-                    while (current->socket != pfds[i].fd || current != NULL) {
-                        current = current->next;
-                    }
-
-                    if (!current)
-                        continue;
-
-                    printf("Processing connection on socket %d with %s state",
-                            current->socket,
-                            current->state == RECV_REQ ? "CORRECT" : "WRONG");
-
-                    switch (current->state) {
+                    switch (current_entry->conn->state) {
                     case RECV_REQ:
-                        m_recv_req(current);
+                        m_recv_req(current_entry->conn);
                         break;
                     case SEND_HEAD:
-                        m_send_head(current);
+                        m_send_head(current_entry->conn);
                         break;
                     case SEND_RESP:
-                        m_send_resp(current);
+                        m_send_resp(current_entry->conn);
                         break;
                     case DONE:
                         break;
                     }
 
-                    if (current->state == DONE) {
-                        m_del_pfd(pfds, i, &fd_count);
-                        m_del_conn_queue(&head);
+                    if (current_entry->conn->state == DONE) {
+                        close(conns[i].pfd.fd);
+                        free(conns[i].conn);
+                        conns[i] = conns[conn_count - 1];
+                        conn_count--;
                     }
                 }
             }
