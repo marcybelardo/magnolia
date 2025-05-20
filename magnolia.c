@@ -19,6 +19,7 @@
 #include <arpa/inet.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <signal.h>
 
 static const char PKG_NAME[] = "magnolia v 0.0.1";
 
@@ -29,6 +30,16 @@ static int SOCKFD = -1;
 static char *PORT = "8888";
 static char *ROOT_DIR = NULL;
 static const char *INDEX_NAME = "index.html";
+
+void sigchld_handler(int s)
+{
+    // waitpid() might overwrite errno, so we save and restore it:
+    int saved_errno = errno;
+
+    while (waitpid(-1, NULL, WNOHANG) > 0);
+
+    errno = saved_errno;
+}
 
 struct m_conn {
     int socket;
@@ -65,10 +76,14 @@ struct m_conn *m_init_conn(int fd)
     return new_conn;
 }
 
-struct conn_entry {
-    struct pollfd pfd;
-    struct m_conn *conn;
-};
+void m_free_conn(struct m_conn *conn)
+{
+    free(conn->req);
+    free(conn->method);
+    free(conn->uri);
+    free(conn->header);
+    free(conn->resp);
+}
 
 typedef struct {
     const char *ext;
@@ -169,30 +184,65 @@ static const char *get_mime_type(char *filename)
     return DEFAULT_MIME_TYPE;
 }
 
-void m_setnonblocking(int fd)
+void m_send_head(struct m_conn *conn)
 {
-    int flags = fcntl(fd, F_GETFL, 0);
-    flags = flags | O_NONBLOCK;
+    size_t sent;
 
-    fcntl(fd, F_SETFL, flags);
+    assert(conn->state == SEND_HEAD);
+    assert(conn->header_len == strlen(conn->header));
+
+    sent = send(conn->socket, conn->header, conn->header_len, 0);
+    if (sent < 1) {
+        if (sent == -1) {
+            fprintf(stderr, "[ERROR] send header %d, %s\n",
+                    conn->socket, strerror(errno));
+        }
+        conn->state = DONE;
+        return;
+    }
+
+    assert(sent > 0);
+}
+
+void m_send_resp(struct m_conn *conn)
+{
+    size_t sent;
+
+    assert(conn->state == SEND_RESP);
+    sent = send(conn->socket, conn->resp, conn->resp_len, 0);
+    if (sent < 1) {
+        if (sent == -1) {
+            fprintf(stderr, "[ERROR] send resp %d: %s\n",
+                    conn->socket, strerror(errno));
+        }
+        conn->state = DONE;
+        return;
+    }
+
+    conn->state = DONE;
 }
 
 void m_reply(struct m_conn *conn, int code, const char *msg)
 {
-    conn->resp_len = snprintf(conn->resp, 256,
-            "<!DOCTYPE html><head><title>%d %s</title></head><body>\n"
-            "<h1>%d %s</h1>\n"
-            "<hr>\n"
-            "</body></html>\n",
-            code, msg, code, msg); 
-
-    conn->header_len = snprintf(conn->header, 256,
+    conn->header_len = snprintf(conn->header, 512,
             "HTTP/1.1 %d %s\r\n"
             "Server: magnolia\r\n"
             "Content-Length: %lu\r\n"
             "Content-Type: text/html; charset=UTF-8\r\n"
             "\r\n",
             code, msg, conn->resp_len);
+
+    conn->resp_len = snprintf(conn->resp, 1024,
+            "<!DOCTYPE html><head><title>%d %s</title></head><body>\n"
+            "<h1>%d %s</h1>\n"
+            "<hr>\n"
+            "</body></html>\n",
+            code, msg, code, msg); 
+
+    conn->state = SEND_HEAD;
+    m_send_head(conn);
+    conn->state = SEND_RESP;
+    m_send_resp(conn);
 }
 
 void m_get(struct m_conn *conn)
@@ -258,7 +308,7 @@ void m_recv_req(struct m_conn *conn)
     recvd = recv(conn->socket, buf, sizeof buf, 0);
     if (recvd < 1) {
         if (recvd == -1) {
-            fprintf(stderr, "[ERROR] revc %d: %s\n",
+            fprintf(stderr, "[ERROR] recv %d: %s\n",
                     conn->socket, strerror(errno));
         }
         conn->state = DONE;
@@ -277,44 +327,6 @@ void m_recv_req(struct m_conn *conn)
     m_process_req(conn);
 }
 
-void m_send_head(struct m_conn *conn)
-{
-    size_t sent;
-
-    assert(conn->state == SEND_HEAD);
-    assert(conn->header_len == strlen(conn->header));
-
-    sent = send(conn->socket, conn->header, conn->header_len, 0);
-    if (sent < 1) {
-        if (sent == -1) {
-            fprintf(stderr, "[ERROR] send header %d, %s\n",
-                    conn->socket, strerror(errno));
-        }
-        conn->state = DONE;
-        return;
-    }
-
-    assert(sent > 0);
-}
-
-void m_send_resp(struct m_conn *conn)
-{
-    size_t sent;
-
-    assert(conn->state == SEND_RESP);
-    sent = send(conn->socket, conn->resp, conn->resp_len, 0);
-    if (sent < 1) {
-        if (sent == -1) {
-            fprintf(stderr, "[ERROR] send resp %d: %s\n",
-                    conn->socket, strerror(errno));
-        }
-        conn->state = DONE;
-        return;
-    }
-
-    conn->state = DONE;
-}
-
 void m_http_process()
 {
     int newfd;
@@ -327,71 +339,31 @@ void m_http_process()
         exit(EXIT_FAILURE);
     }
 
-    struct conn_entry conns[MAX_CONNS];
-    int conn_count = 0;
-
-    conns[0].pfd.fd = SOCKFD;
-    conns[0].pfd.events = POLLIN;
-    conn_count++;
-
     for (;;) {
-        int poll_count = poll((struct pollfd *)conns, conn_count, -1);
-        if (poll_count == -1) {
-            perror("[MAGNOLIA] poll");
-            exit(EXIT_FAILURE);
+        addrlen = sizeof client_addr;
+        newfd = accept(SOCKFD, (struct sockaddr *)&client_addr, &addrlen);
+        if (newfd == -1) {
+            perror("[MAGNOLIA] accept");
+            continue;
         }
 
-        for (int i = 0; i < conn_count; i++) {
-            if (conns[i].pfd.revents & (POLLIN | POLLHUP)) {
-                if (conns[i].pfd.fd == SOCKFD) {
-                    // handle new conn
-                    printf("Incoming connection...\n");
-                    addrlen = sizeof client_addr;
-                    newfd = accept(SOCKFD, (struct sockaddr *)&client_addr, &addrlen);
-                    if (newfd == -1) {
-                        perror("[MAGNOLIA] accept");
-                    } else {
-                        m_setnonblocking(newfd);
-                        struct conn_entry *new_entry = &conns[conn_count];
-                        new_entry->pfd.fd = newfd;
-                        new_entry->pfd.events = POLLIN;
-                        new_entry->conn = m_init_conn(newfd);
-                        conn_count++;
-                        printf("[MAGNOLIA] new connection from %s on "
-                                "socket %d\n",
-                                inet_ntop(client_addr.ss_family,
-                                    get_in_addr((struct sockaddr *)&client_addr),
-                                    clientIP, INET6_ADDRSTRLEN),
-                                newfd);
-                    }
-                } else {
-                    struct conn_entry *current_entry = &conns[i];
-                    printf("[MAGNOLIA] m_http_process reading from conn %d\n",
-                            current_entry->pfd.fd);
+        printf("[MAGNOLIA] new connection from %s on "
+                "socket %d\n",
+                inet_ntop(client_addr.ss_family,
+                    get_in_addr((struct sockaddr *)&client_addr),
+                    clientIP, INET6_ADDRSTRLEN),
+                newfd);
 
-                    switch (current_entry->conn->state) {
-                    case RECV_REQ:
-                        m_recv_req(current_entry->conn);
-                        break;
-                    case SEND_HEAD:
-                        m_send_head(current_entry->conn);
-                        break;
-                    case SEND_RESP:
-                        m_send_resp(current_entry->conn);
-                        break;
-                    case DONE:
-                        break;
-                    }
-
-                    if (current_entry->conn->state == DONE) {
-                        close(conns[i].pfd.fd);
-                        free(conns[i].conn);
-                        conns[i] = conns[conn_count - 1];
-                        conn_count--;
-                    }
-                }
-            }
+        if (!fork()) {
+            close(SOCKFD);
+            struct m_conn *newconn = m_init_conn(newfd);
+            m_recv_req(newconn);
+            close(newfd);
+            m_free_conn(newconn);
+            free(newconn);
         }
+
+        close(newfd);
     }
 }
 
@@ -429,9 +401,18 @@ void parse_commands(const int argc, char *argv[])
 
 int main(int argc, char *argv[])
 {
+    struct sigaction sa;
     printf("%s\n", PKG_NAME);
     parse_commands(argc, argv);
     m_init_socket();
+
+    sa.sa_handler = sigchld_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    if (sigaction(SIGCHLD, &sa, NULL) == -1) {
+        perror("sigaction");
+        return 1;
+    }
 
     for (;;)
         m_http_process();
