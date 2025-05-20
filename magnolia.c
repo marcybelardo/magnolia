@@ -30,6 +30,7 @@ static int SOCKFD = -1;
 static char *PORT = "8888";
 static char *ROOT_DIR = NULL;
 static const char *INDEX_NAME = "index.html";
+static int run_daemon = 0;
 
 void sigchld_handler(int s)
 {
@@ -367,13 +368,71 @@ void m_http_process()
     }
 }
 
+static void usage(const char *argv0)
+{
+    printf("%s\n", PKG_NAME);
+    printf("a little HTTP server\n\n");
+    printf("USAGE:\t%s <site root>\n\n", argv0);
+    printf("Flags:\t--port <number> (default: %s)\n", PORT);
+    printf("\t\tPort to listen on for connections.\n");
+}
+
+static int fd_null = -1;
+
+static void m_daemon_start()
+{
+    pid_t f;
+
+    fd_null = open("/dev/null", O_RDWR, 0);
+    if (fd_null == -1) {
+        fprintf(stderr, "[ERROR] m_daemon_start fd_null open\n");
+        exit(errno);
+    }
+
+    if ((f = fork()) == -1) {
+        fprintf(stderr, "[ERROR] m_daemon_start fork\n");
+        exit(errno);
+    } else if (f != 0) {
+        pid_t w;
+        int status;
+
+        if ((w = waitpid(f, &status, WNOHANG)) == -1) {
+            fprintf(stderr, "[ERROR] m_daemon_start waitpid\n");
+            exit(errno);
+        } else if (w == 0) {
+            exit(EXIT_SUCCESS);
+        } else {
+            exit(WEXITSTATUS(status));
+        }
+    }
+}
+
+void m_daemon_finish()
+{
+    if (fd_null == -1)
+        return;
+
+    if (setsid() == -1)
+        fprintf(stderr, "[ERROR] m_daemon_finish setsid\n");
+
+    if (dup2(fd_null, STDIN_FILENO) == -1)
+        fprintf(stderr, "[WARN] m_daemon_finish dup2 stdin");
+    if (dup2(fd_null, STDOUT_FILENO) == -1)
+        fprintf(stderr, "[WARN] m_daemon_finish dup2 stdout");
+    if (dup2(fd_null, STDERR_FILENO) == -1)
+        fprintf(stderr, "[WARN] m_daemon_finish dup2 stderr");
+
+    if (fd_null > 2)
+        close(fd_null);
+}
+
 void parse_commands(const int argc, char *argv[])
 {
     int i;
     size_t len;
 
     if ((argc < 2) || (argc == 2 && strcmp(argv[1], "--help") == 0)) {
-        printf("USAGE:\t%s /path/to/root [flags]\n\n", argv[0]);
+        usage(argv[0]);
         exit(EXIT_SUCCESS);
     }
 
@@ -396,15 +455,21 @@ void parse_commands(const int argc, char *argv[])
             }
             PORT = argv[i];
         }
+
+        if (strcmp(argv[i], "--daemon") == 0) {
+            run_daemon = 1;
+        }
     }
 }
 
 int main(int argc, char *argv[])
 {
     struct sigaction sa;
-    printf("%s\n", PKG_NAME);
     parse_commands(argc, argv);
     m_init_socket();
+
+    if (run_daemon)
+        m_daemon_start();
 
     sa.sa_handler = sigchld_handler;
     sigemptyset(&sa.sa_mask);
@@ -413,6 +478,9 @@ int main(int argc, char *argv[])
         perror("sigaction");
         return 1;
     }
+
+    if (run_daemon)
+        m_daemon_finish();
 
     for (;;)
         m_http_process();
