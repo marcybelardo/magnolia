@@ -77,15 +77,6 @@ struct m_conn *m_init_conn(int fd)
     return new_conn;
 }
 
-void m_free_conn(struct m_conn *conn)
-{
-    free(conn->req);
-    free(conn->method);
-    free(conn->uri);
-    free(conn->header);
-    free(conn->resp);
-}
-
 typedef struct {
     const char *ext;
     const char *type;
@@ -203,6 +194,9 @@ void m_send_head(struct m_conn *conn)
     }
 
     assert(sent > 0);
+
+    free(conn->header);
+    conn->header = NULL;
 }
 
 void m_send_resp(struct m_conn *conn)
@@ -221,6 +215,13 @@ void m_send_resp(struct m_conn *conn)
     }
 
     conn->state = DONE;
+
+    free(conn->resp);
+    free(conn->method);
+    free(conn->uri);
+    conn->resp = NULL;
+    conn->method = NULL;
+    conn->uri = NULL;
 }
 
 void m_reply(struct m_conn *conn, int code, const char *msg)
@@ -360,7 +361,6 @@ void m_http_process()
             struct m_conn *newconn = m_init_conn(newfd);
             m_recv_req(newconn);
             close(newfd);
-            m_free_conn(newconn);
             free(newconn);
         }
 
@@ -448,7 +448,8 @@ void parse_commands(const int argc, char *argv[])
     }
 
     for (i = 2; i < argc; i++) {
-        if (strcmp(argv[i], "--port") == 0) {
+        if ((strcmp(argv[i], "--port") == 0) ||
+                (strcmp(argv[i], "-p") == 0)) {
             if (++i >= argc) {
                 fprintf(stderr, "Please supply a port number\n");
                 exit(EXIT_FAILURE);
@@ -456,7 +457,8 @@ void parse_commands(const int argc, char *argv[])
             PORT = argv[i];
         }
 
-        if (strcmp(argv[i], "--daemon") == 0) {
+        if ((strcmp(argv[i], "--daemon") == 0) ||
+                (strcmp(argv[i], "-d") == 0)) {
             run_daemon = 1;
         }
     }
